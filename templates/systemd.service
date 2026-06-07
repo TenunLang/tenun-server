@@ -1,0 +1,18 @@
+# Referensi unit systemd (dihasilkan oleh `tenun-server new`).
+# /etc/systemd/system/tenun-<slug>.service
+[Unit]
+Description=Tenun app (DOMAIN)
+After=network.target postgresql.service redis.service
+
+[Service]
+Type=simple
+User=www
+WorkingDirectory=/www/wwwroot/DOMAIN
+Environment=TENUN_WORKERS=1
+Environment=TENUN_PORT=PORT
+ExecStart=/usr/local/bin/tenun
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

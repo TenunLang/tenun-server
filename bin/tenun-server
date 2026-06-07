@@ -1,0 +1,191 @@
+#!/usr/bin/env bash
+# tenun-server — kelola aplikasi Tenun di Linux + integrasi nginx (aaPanel).
+#   tenun-server new <domain> [--dir DIR] [--port PORT] [--user USER]
+#   tenun-server rm <domain>
+#   tenun-server list | restart <domain> | stop <domain> | start <domain> | logs <domain>
+set -euo pipefail
+
+TENUN_BIN=/usr/local/bin/tenun
+AAVHOST=/www/server/panel/vhost/nginx
+AACERT=/www/server/panel/vhost/cert
+WWWROOT=/www/wwwroot
+WWWLOGS=/www/wwwlogs
+
+die() { echo "error: $*" >&2; exit 1; }
+[ "$(id -u)" = "0" ] || die "jalankan sebagai root (sudo)"
+
+slug() { echo "$1" | tr '.' '-' | tr -cd 'a-zA-Z0-9-'; }
+autoport() { # port stabil 8001-8999 dari domain
+  local h; h=$(echo -n "$1" | cksum | cut -d' ' -f1); echo $(( 8001 + h % 8999 ))
+}
+
+nginx_bin() {
+  if [ -x /www/server/nginx/sbin/nginx ]; then echo /www/server/nginx/sbin/nginx
+  elif command -v nginx >/dev/null 2>&1; then command -v nginx
+  else die "nginx tidak ditemukan"; fi
+}
+nginx_reload() {
+  local nb; nb=$(nginx_bin)
+  "$nb" -t || die "konfigurasi nginx invalid, batal reload"
+  if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet nginx; then systemctl reload nginx
+  elif [ -x /etc/init.d/nginx ]; then /etc/init.d/nginx reload
+  else "$nb" -s reload; fi
+  echo "  nginx di-reload"
+}
+
+write_vhost() {
+  local domain="$1" port="$2"
+  local conf="$AAVHOST/$domain.conf"
+  local ssl="" listen_ssl="" wk=""
+  if [ -f "$AACERT/$domain/fullchain.pem" ]; then
+    listen_ssl=$'    listen 443 ssl;\n    listen [::]:443 ssl;\n    http2 on;'
+    ssl=$(cat <<SSL
+    ssl_certificate     $AACERT/$domain/fullchain.pem;
+    ssl_certificate_key $AACERT/$domain/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_prefer_server_ciphers on;
+    add_header Strict-Transport-Security "max-age=31536000";
+    error_page 497 https://\$host\$request_uri;
+SSL
+)
+  fi
+  [ -f "$AAVHOST/well-known/$domain.conf" ] && wk="    include $AAVHOST/well-known/$domain.conf;"
+  [ -f "$conf" ] && cp -f "$conf" "$conf.tenun.bak.$(date +%s)" && echo "  backup vhost lama -> $conf.tenun.bak.*"
+
+  cat > "$conf" <<NGINX
+# Dikelola oleh tenun-server — reverse proxy ke aplikasi Tenun (HTTP + WebSocket).
+server {
+    listen 80;
+    listen [::]:80;
+$listen_ssl
+    server_name $domain;
+$ssl
+
+    #CERT-APPLY-CHECK--START
+$wk
+    #CERT-APPLY-CHECK--END
+
+    access_log $WWWLOGS/$domain.log;
+    error_log  $WWWLOGS/$domain.error.log;
+
+    client_max_body_size 50m;
+
+    location / {
+        proxy_pass http://127.0.0.1:$port;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection \$http_connection;   # teruskan keep-alive / Upgrade (WebSocket)
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+        proxy_buffering off;
+    }
+}
+NGINX
+  echo "  vhost ditulis -> $conf  (proxy :$port)"
+}
+
+write_service() {
+  local domain="$1" port="$2" dir="$3" user="$4"
+  local s; s=$(slug "$domain")
+  cat > "/etc/systemd/system/tenun-$s.service" <<UNIT
+[Unit]
+Description=Tenun app ($domain)
+After=network.target postgresql.service redis.service redis-server.service
+
+[Service]
+Type=simple
+User=$user
+WorkingDirectory=$dir
+Environment=TENUN_WORKERS=1
+Environment=TENUN_PORT=$port
+ExecStart=$TENUN_BIN
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+  systemctl daemon-reload
+  systemctl enable --now "tenun-$s" >/dev/null 2>&1 || systemctl restart "tenun-$s"
+  echo "  systemd: tenun-$s (User=$user, port=$port) aktif"
+}
+
+cmd_new() {
+  local domain="" dir="" port="" user="www"
+  domain="${1:-}"; shift || true
+  [ -n "$domain" ] || die "pakai: tenun-server new <domain> [--dir DIR] [--port PORT] [--user USER]"
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --dir) dir="$2"; shift 2;;
+      --port) port="$2"; shift 2;;
+      --user) user="$2"; shift 2;;
+      *) die "opsi tak dikenal: $1";;
+    esac
+  done
+  [ -n "$dir" ] || dir="$WWWROOT/$domain"
+  [ -n "$port" ] || port=$(autoport "$domain")
+  id "$user" >/dev/null 2>&1 || user=root
+  [ -d "$dir" ] || die "folder app tidak ada: $dir (buat domain di aaPanel + taruh app dulu)"
+  [ -f "$dir/index.tenun" ] || echo "  WARNING: $dir/index.tenun tidak ada — pastikan app Tenun benar"
+  [ -x "$TENUN_BIN" ] || die "binary tenun tak ada di $TENUN_BIN (jalankan install.sh)"
+  mkdir -p "$WWWLOGS"
+
+  echo "[tenun-server] menyiapkan $domain -> 127.0.0.1:$port (dir: $dir)"
+  echo "[app] pasang dependensi modul (tenun add)..."
+  ( cd "$dir" && [ -f tenun.json ] && "$TENUN_BIN" add jala >/dev/null 2>&1 || true )
+
+  write_service "$domain" "$port" "$dir" "$user"
+  write_vhost "$domain" "$port"
+  nginx_reload
+  echo "[selesai] buka: https://$domain  (atau http:// bila belum SSL)"
+}
+
+cmd_rm() {
+  local domain="${1:-}"; [ -n "$domain" ] || die "pakai: tenun-server rm <domain>"
+  local s; s=$(slug "$domain")
+  systemctl disable --now "tenun-$s" >/dev/null 2>&1 || true
+  rm -f "/etc/systemd/system/tenun-$s.service"; systemctl daemon-reload
+  local conf="$AAVHOST/$domain.conf"
+  local bak; bak=$(ls -t "$conf".tenun.bak.* 2>/dev/null | head -1 || true)
+  if [ -n "$bak" ]; then mv -f "$bak" "$conf"; echo "  vhost dipulihkan dari backup"; else rm -f "$conf"; echo "  vhost dihapus"; fi
+  nginx_reload
+  echo "[selesai] $domain dilepas dari Tenun"
+}
+
+cmd_list() {
+  systemctl list-units --type=service --all 'tenun-*' --no-legend 2>/dev/null | awk '{print $1, $4}' || true
+}
+cmd_one() { local a="$1" d="${2:-}"; [ -n "$d" ] || die "pakai: tenun-server $a <domain>"; systemctl "$a" "tenun-$(slug "$d")"; }
+cmd_logs() { local d="${1:-}"; [ -n "$d" ] || die "pakai: tenun-server logs <domain>"; journalctl -u "tenun-$(slug "$d")" -f --no-pager; }
+
+case "${1:-}" in
+  new) shift; cmd_new "$@";;
+  rm|remove) shift; cmd_rm "$@";;
+  list|ls) cmd_list;;
+  restart) shift; cmd_one restart "$@";;
+  stop) shift; cmd_one stop "$@";;
+  start) shift; cmd_one start "$@";;
+  status) shift; cmd_one status "$@";;
+  logs) shift; cmd_logs "$@";;
+  install) curl -fsSL "https://github.com/TenunLang/Tenun/releases/latest/download/tenun-linux-$(uname -m | sed 's/amd64/x86_64/;s/arm64/aarch64/')" -o "$TENUN_BIN" && chmod +x "$TENUN_BIN" && echo "tenun diperbarui";;
+  *)
+    cat <<USAGE
+tenun-server — deploy aplikasi Tenun + nginx (aaPanel)
+
+  tenun-server new <domain> [--dir DIR] [--port PORT] [--user USER]
+      Buat systemd service + vhost reverse-proxy (HTTP+WebSocket) untuk domain.
+      DIR default /www/wwwroot/<domain>, PORT otomatis, USER default www.
+  tenun-server rm <domain>          Lepas: hentikan service + pulihkan/hapus vhost.
+  tenun-server list                 Daftar app Tenun.
+  tenun-server restart|stop|start|status <domain>
+  tenun-server logs <domain>        Ikuti log (journalctl).
+  tenun-server install              Perbarui binary tenun.
+
+Alur: buat domain di aaPanel -> taruh app di /www/wwwroot/<domain> -> tenun-server new <domain>.
+USAGE
+    ;;
+esac
