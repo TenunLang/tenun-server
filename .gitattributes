@@ -1,0 +1,5 @@
+* text=auto eol=lf
+*.sh text eol=lf
+bin/tenun-server text eol=lf
+install.sh text eol=lf
+templates/* text eol=lf
