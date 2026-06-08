@@ -38,6 +38,9 @@ echo "[3/3] Selesai."
 echo
 echo "Pakai:"
 echo "  1) Buat domain di aaPanel (root: /www/wwwroot/<domain>) + pasang SSL bila perlu."
-echo "  2) Taruh aplikasi Tenun di /www/wwwroot/<domain> (ada index.tenun)."
-echo "  3) tenun-server new <domain>          # port otomatis + reverse proxy nginx + systemd"
+echo "  2) Taruh aplikasi Tenun di /www/wwwroot/<domain> (entry default index.tenun)."
+echo "  3) tenun-server new <domain>                 # port otomatis + reverse proxy nginx + systemd"
+echo "     tenun-server new <domain> --entry app.tenun   # entry custom (bukan index.tenun)"
 echo "  4) buka https://<domain>"
+echo
+echo "Copot semua: tenun-server uninstall"

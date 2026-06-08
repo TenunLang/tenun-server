@@ -6,6 +6,7 @@
 set -euo pipefail
 
 TENUN_BIN=/usr/local/bin/tenun
+CLI=/usr/local/bin/tenun-server
 AAVHOST=/www/server/panel/vhost/nginx
 AACERT=/www/server/panel/vhost/cert
 WWWROOT=/www/wwwroot
@@ -89,7 +90,7 @@ NGINX
 }
 
 write_service() {
-  local domain="$1" port="$2" dir="$3" user="$4"
+  local domain="$1" port="$2" dir="$3" user="$4" entry="${5:-index.tenun}"
   local s; s=$(slug "$domain")
   cat > "/etc/systemd/system/tenun-$s.service" <<UNIT
 [Unit]
@@ -102,7 +103,7 @@ User=$user
 WorkingDirectory=$dir
 Environment=TENUN_WORKERS=1
 Environment=TENUN_PORT=$port
-ExecStart=$TENUN_BIN
+ExecStart=$TENUN_BIN $entry
 Restart=always
 RestartSec=3
 
@@ -115,14 +116,15 @@ UNIT
 }
 
 cmd_new() {
-  local domain="" dir="" port="" user="www"
+  local domain="" dir="" port="" user="www" entry="index.tenun"
   domain="${1:-}"; shift || true
-  [ -n "$domain" ] || die "pakai: tenun-server new <domain> [--dir DIR] [--port PORT] [--user USER]"
+  [ -n "$domain" ] || die "pakai: tenun-server new <domain> [--dir DIR] [--port PORT] [--user USER] [--entry FILE]"
   while [ $# -gt 0 ]; do
     case "$1" in
       --dir) dir="$2"; shift 2;;
       --port) port="$2"; shift 2;;
       --user) user="$2"; shift 2;;
+      --entry) entry="$2"; shift 2;;
       *) die "opsi tak dikenal: $1";;
     esac
   done
@@ -130,15 +132,15 @@ cmd_new() {
   [ -n "$port" ] || port=$(autoport "$domain")
   id "$user" >/dev/null 2>&1 || user=root
   [ -d "$dir" ] || die "folder app tidak ada: $dir (buat domain di aaPanel + taruh app dulu)"
-  [ -f "$dir/index.tenun" ] || echo "  WARNING: $dir/index.tenun tidak ada — pastikan app Tenun benar"
+  [ -f "$dir/$entry" ] || echo "  WARNING: $dir/$entry tidak ada — pastikan entry file Tenun benar"
   [ -x "$TENUN_BIN" ] || die "binary tenun tak ada di $TENUN_BIN (jalankan install.sh)"
   mkdir -p "$WWWLOGS"
 
-  echo "[tenun-server] menyiapkan $domain -> 127.0.0.1:$port (dir: $dir)"
+  echo "[tenun-server] menyiapkan $domain -> 127.0.0.1:$port (dir: $dir, entry: $entry)"
   echo "[app] pasang dependensi modul (tenun add)..."
   ( cd "$dir" && [ -f tenun.json ] && "$TENUN_BIN" add jala >/dev/null 2>&1 || true )
 
-  write_service "$domain" "$port" "$dir" "$user"
+  write_service "$domain" "$port" "$dir" "$user" "$entry"
   write_vhost "$domain" "$port"
   nginx_reload
   echo "[selesai] buka: https://$domain  (atau http:// bila belum SSL)"
@@ -162,6 +164,48 @@ cmd_list() {
 cmd_one() { local a="$1" d="${2:-}"; [ -n "$d" ] || die "pakai: tenun-server $a <domain>"; systemctl "$a" "tenun-$(slug "$d")"; }
 cmd_logs() { local d="${1:-}"; [ -n "$d" ] || die "pakai: tenun-server logs <domain>"; journalctl -u "tenun-$(slug "$d")" -f --no-pager; }
 
+cmd_uninstall() {
+  local yes=0
+  while [ $# -gt 0 ]; do case "$1" in -y|--yes) yes=1; shift;; *) shift;; esac; done
+
+  echo "Ini akan menghapus SEMUA app Tenun + CLI + binary:"
+  echo "  - semua service systemd tenun-*"
+  echo "  - vhost nginx yang dikelola tenun-server (backup dipulihkan bila ada)"
+  echo "  - $CLI dan $TENUN_BIN"
+  if [ "$yes" != "1" ]; then
+    printf "Lanjut? ketik 'ya' untuk konfirmasi: "
+    local ans=""; read -r ans < /dev/tty || true
+    [ "$ans" = "ya" ] || { echo "dibatalkan."; return 0; }
+  fi
+
+  echo "[1/4] hentikan + hapus service systemd tenun-*..."
+  local units; units=$(systemctl list-unit-files 'tenun-*.service' --no-legend 2>/dev/null | awk '{print $1}')
+  for u in $units; do
+    systemctl disable --now "$u" >/dev/null 2>&1 || true
+    rm -f "/etc/systemd/system/$u"
+    echo "  hapus $u"
+  done
+  systemctl daemon-reload 2>/dev/null || true
+
+  echo "[2/4] lepas vhost nginx yang dikelola tenun-server..."
+  if [ -d "$AAVHOST" ]; then
+    for conf in "$AAVHOST"/*.conf; do
+      [ -f "$conf" ] || continue
+      grep -q "Dikelola oleh tenun-server" "$conf" 2>/dev/null || continue
+      local bak; bak=$(ls -t "$conf".tenun.bak.* 2>/dev/null | head -1 || true)
+      if [ -n "$bak" ]; then mv -f "$bak" "$conf"; echo "  pulihkan $(basename "$conf") dari backup";
+      else rm -f "$conf"; echo "  hapus $(basename "$conf")"; fi
+    done
+    nginx_reload 2>/dev/null || echo "  (lewati reload nginx)"
+  fi
+
+  echo "[3/4] hapus binary + CLI..."
+  rm -f "$CLI" "$TENUN_BIN"
+  rm -f /usr/local/bin/tenun-server   # jaga-jaga bila CLI berbeda path
+
+  echo "[4/4] selesai. Tenun-server tercopot."
+}
+
 case "${1:-}" in
   new) shift; cmd_new "$@";;
   rm|remove) shift; cmd_rm "$@";;
@@ -172,18 +216,21 @@ case "${1:-}" in
   status) shift; cmd_one status "$@";;
   logs) shift; cmd_logs "$@";;
   install) curl -fsSL "https://github.com/TenunLang/Tenun/releases/latest/download/tenun-linux-$(uname -m | sed 's/amd64/x86_64/;s/arm64/aarch64/')" -o "$TENUN_BIN" && chmod +x "$TENUN_BIN" && echo "tenun diperbarui";;
+  uninstall) shift; cmd_uninstall "$@";;
   *)
     cat <<USAGE
 tenun-server — deploy aplikasi Tenun + nginx (aaPanel)
 
-  tenun-server new <domain> [--dir DIR] [--port PORT] [--user USER]
+  tenun-server new <domain> [--dir DIR] [--port PORT] [--user USER] [--entry FILE]
       Buat systemd service + vhost reverse-proxy (HTTP+WebSocket) untuk domain.
-      DIR default /www/wwwroot/<domain>, PORT otomatis, USER default www.
+      DIR default /www/wwwroot/<domain>, PORT otomatis, USER default www,
+      ENTRY default index.tenun (bisa file .tenun apa saja, mis. --entry app.tenun).
   tenun-server rm <domain>          Lepas: hentikan service + pulihkan/hapus vhost.
   tenun-server list                 Daftar app Tenun.
   tenun-server restart|stop|start|status <domain>
   tenun-server logs <domain>        Ikuti log (journalctl).
   tenun-server install              Perbarui binary tenun.
+  tenun-server uninstall [-y]       Copot semua: service + vhost + binary + CLI.
 
 Alur: buat domain di aaPanel -> taruh app di /www/wwwroot/<domain> -> tenun-server new <domain>.
 USAGE

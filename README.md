@@ -13,7 +13,7 @@ Memasang binary `tenun` ke `/usr/local/bin/tenun` + CLI `tenun-server`.
 ## Alur deploy (aaPanel)
 
 1. **Buat domain di aaPanel** seperti biasa (root `/www/wwwroot/<domain>`), pasang SSL kalau perlu (Let's Encrypt). Ini bikin vhost + cert + well-known.
-2. **Taruh aplikasi Tenun** di `/www/wwwroot/<domain>` (ada `index.tenun`). Pasang dependensi: `cd /www/wwwroot/<domain> && tenun add jala`.
+2. **Taruh aplikasi Tenun** di `/www/wwwroot/<domain>` (entry default `index.tenun`, atau file `.tenun` apa saja lewat `--entry`). Pasang dependensi: `cd /www/wwwroot/<domain> && tenun add jala`.
 3. **Sambungkan ke Tenun:**
 
 ```
@@ -22,7 +22,7 @@ tenun-server new wa-rs.imtaqin.id
 
 Otomatis:
 - Pilih port (mis. `127.0.0.1:8xxx`) — bisa override `--port`.
-- Bikin **systemd service** `tenun-<domain>` (`TENUN_WORKERS=1`, `TENUN_PORT=<port>`, `WorkingDirectory` = folder app) → auto-start & restart.
+- Bikin **systemd service** `tenun-<domain>` (`TENUN_WORKERS=1`, `TENUN_PORT=<port>`, `WorkingDirectory` = folder app, `ExecStart=tenun <entry>`) → auto-start & restart.
 - **Tulis ulang vhost** `/www/server/panel/vhost/nginx/<domain>.conf` jadi reverse-proxy ke app (HTTP + WebSocket), **mempertahankan SSL cert aaPanel** + blok `well-known` (perpanjangan cert tetap jalan). Vhost lama di-backup `*.tenun.bak.*`.
 - `nginx -t` lalu reload.
 
@@ -31,13 +31,16 @@ Otomatis:
 ## Perintah
 
 ```
-tenun-server new <domain> [--dir DIR] [--port PORT] [--user USER]
+tenun-server new <domain> [--dir DIR] [--port PORT] [--user USER] [--entry FILE]
 tenun-server rm <domain>          # hentikan service + pulihkan vhost lama (backup) / hapus
 tenun-server list                 # daftar app Tenun
 tenun-server restart|stop|start|status <domain>
 tenun-server logs <domain>        # journalctl -f
 tenun-server install              # perbarui binary tenun
+tenun-server uninstall [-y]       # copot semua: service + vhost + binary + CLI
 ```
+
+`--entry` memilih file masuk app (default `index.tenun`). Contoh: `tenun-server new app.imtaqin.id --entry server.tenun`. Service akan menjalankan `tenun <entry>` — sama seperti `node <file>.js`.
 
 ## Cara kerja WebSocket
 

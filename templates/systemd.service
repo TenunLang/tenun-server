@@ -10,7 +10,7 @@ User=www
 WorkingDirectory=/www/wwwroot/DOMAIN
 Environment=TENUN_WORKERS=1
 Environment=TENUN_PORT=PORT
-ExecStart=/usr/local/bin/tenun
+ExecStart=/usr/local/bin/tenun index.tenun
 Restart=always
 RestartSec=3
 
