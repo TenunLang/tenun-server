@@ -137,8 +137,8 @@ cmd_new() {
   mkdir -p "$WWWLOGS"
 
   echo "[tenun-server] menyiapkan $domain -> 127.0.0.1:$port (dir: $dir, entry: $entry)"
-  echo "[app] pasang dependensi modul (tenun add)..."
-  ( cd "$dir" && [ -f tenun.json ] && "$TENUN_BIN" add jala >/dev/null 2>&1 || true )
+  echo "[app] pasang dependensi modul (tenun install)..."
+  ( cd "$dir" && [ -f tenun.json ] && "$TENUN_BIN" install >/dev/null 2>&1 || true )
 
   write_service "$domain" "$port" "$dir" "$user" "$entry"
   write_vhost "$domain" "$port"
